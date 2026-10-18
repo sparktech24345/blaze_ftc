@@ -10,9 +10,9 @@ use crate::control::hardware::Direction::{Backwards, Forwards};
 use crate::sdk_proxy::proxy::Proxy;
 use crate::serialization::command::Command::LynxCommand;
 use crate::serialization::command_utils::Module;
-use crate::serialization::lynx_commands::base_lynx_command::LynxCommand::{LynxGetBulkDataCommand, LynxGetBulkDataResponse, LynxSetMotorChannelModeCommand, LynxSetMotorPowerCommand, LynxSetServoPulseWidthCommand};
+use crate::serialization::lynx_commands::base_lynx_command::LynxCommand::{LynxGetBulkDataCommand, LynxGetBulkDataResponse, LynxSetMotorChannelModeCommand, LynxSetMotorPowerCommand, LynxSetServoEnableCommand, LynxSetServoPulseWidthCommand};
 use crate::serialization::lynx_commands::base_lynx_command::LynxCommandData;
-use crate::serialization::lynx_commands::lynx_commands::{DcMotorRunMode, DcMotorZeroPowerBehavior, LynxGetBulkDataCommandData, LynxGetBulkDataResponseData, LynxSetMotorChannelModeCommandData, LynxSetMotorPowerCommandData, LynxSetServoPulseWidthCommandData};
+use crate::serialization::lynx_commands::lynx_commands::{DcMotorRunMode, DcMotorZeroPowerBehavior, LynxGetBulkDataCommandData, LynxGetBulkDataResponseData, LynxSetMotorChannelModeCommandData, LynxSetMotorPowerCommandData, LynxSetServoEnableCommandData, LynxSetServoPulseWidthCommandData};
 use crate::serialization::packet::{Packet, Packets};
 use crate::{HUB_0, HUB_1};
 use crate::sdk_proxy::send_proxy::register_packet;
@@ -261,12 +261,56 @@ impl LynxHub {
         }
         self.send_lynx_packets(packets)
     }
+    pub fn send_servo_commands(&'static self, positions: [f64; 6]) -> Option<()> {
+        let positions = positions.map(|position| {
+            if position.is_finite() {
+                Some((position.clamp(0.0, 1.0) * i16::MAX as f64) as i16)
+            } else {
+                None
+            }
+        });
+        self.send_servo_commands_i16(&positions)
+    }
     ///here be dragons! This is an entirely untested method, so... idk just don't expect this to work at all.
     pub fn send_servo_command(&'static self, servo: u8, position: f32) {
-        let pwm = position * 1800.0 + 600.0;//these taken from the default pwm values. I think
-        let pwm = 65535_f32.min(pwm).max(1_f32) as u16;
-        let lynx_command = LynxSetServoPulseWidthCommand(LynxSetServoPulseWidthCommandData { servo, pulse_width: pwm});
-        self.send_lynx_packet(lynx_command);
+        if !position.is_finite() {
+            log::error!("cannot set servo {} to non-finite position {}", servo, position);
+            return;
+        }
+        let pulse_width = (position.clamp(0.0, 1.0) * 1800.0 + 600.0) as u16;
+        self.send_lynx_packet(LynxSetServoPulseWidthCommand(
+            LynxSetServoPulseWidthCommandData { servo, pulse_width },
+        ));
+        self.send_lynx_packet(LynxSetServoEnableCommand(
+            LynxSetServoEnableCommandData { servo, enabled: true },
+        ));
+    }
+    pub fn send_servo_commands_i16(&'static self, positions: &[Option<i16>]) -> Option<()> {
+        let commands = positions.iter().enumerate().filter_map(|(servo, position)| {
+            let position = position.map(|position| {
+                (position as f32 / i16::MAX as f32).clamp(0.0, 1.0)
+            })?;
+            let pulse_width = position * 1800.0 + 600.0;
+            let pulse_width = 65535_f32.min(pulse_width).max(1_f32) as u16;
+            let servo = servo as u8;
+            Some([
+                LynxSetServoPulseWidthCommand(LynxSetServoPulseWidthCommandData {
+                    servo,
+                    pulse_width,
+                }),
+                LynxSetServoEnableCommand(LynxSetServoEnableCommandData {
+                    servo,
+                    enabled: true,
+                }),
+            ])
+        }).flatten().collect();
+        if self.is_over_rs.is_some() {
+            for command in commands {
+                self.send_lynx_packet(command);
+            }
+            return Some(());
+        }
+        self.send_lynx_packets(commands)
     }
     pub fn send_bulk_read(&'static self) {
         let lynx_command = LynxGetBulkDataCommand(LynxGetBulkDataCommandData {});

@@ -368,6 +368,67 @@ impl CommandData for LynxSetServoPulseWidthCommandData {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub struct LynxSetServoEnableCommandData {
+    pub servo: u8,
+    pub enabled: bool,
+}
+impl Display for LynxSetServoEnableCommandData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LynxSetServoEnable[servo:{},enabled:{}]", self.servo, self.enabled)
+    }
+}
+impl Into<Vec<u8>> for LynxSetServoEnableCommandData {
+    fn into(self) -> Vec<u8> {
+        vec![self.servo, u8::from(self.enabled)]
+    }
+}
+impl CommandData for LynxSetServoEnableCommandData {
+    fn to_packet_id(&self) -> u16 {
+        35
+    }
+    fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
+        if id == 35 {
+            Some(LynxSetServoEnableCommandData {
+                servo: data[0],
+                enabled: data[1] != 0,
+            })
+        } else {
+            None
+        }
+    }
+    fn get_bytes_len(&self) -> usize {
+        2
+    }
+}
+
+#[cfg(test)]
+mod servo_pulse_width_tests {
+    use super::*;
+
+    #[test]
+    fn uses_ftc_servo_pulse_width_command_id_and_payload() {
+        let command = LynxSetServoPulseWidthCommandData {
+            servo: 0,
+            pulse_width: 2040,
+        };
+        assert_eq!(command.to_packet_id(), 33);
+        let payload: Vec<u8> = command.into();
+        assert_eq!(payload, vec![0, 0xf8, 0x07]);
+    }
+
+    #[test]
+    fn servo_enable_uses_ftc_command_id_and_payload() {
+        let command = LynxSetServoEnableCommandData {
+            servo: 0,
+            enabled: true,
+        };
+        assert_eq!(command.to_packet_id(), 35);
+        let payload: Vec<u8> = command.into();
+        assert_eq!(payload, vec![0, 1]);
+    }
+}
+
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct LynxSetMotorChannelEnableCommandData {

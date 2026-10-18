@@ -15,6 +15,7 @@ pub enum LynxCommand {
     LynxGetBulkDataResponse(LynxGetBulkDataResponseData),
     LynxSetMotorPowerCommand(LynxSetMotorPowerCommandData),
     LynxSetServoPulseWidthCommand(LynxSetServoPulseWidthCommandData),
+    LynxSetServoEnableCommand(LynxSetServoEnableCommandData),
     LynxSetMotorChannelEnableCommand(LynxSetMotorChannelEnableCommandData),
     LynxGetMotorChannelModeCommand(LynxGetMotorChannelModeCommandData),
     LynxGetMotorChannelModeResponse(LynxGetMotorChannelModeResponseData),
@@ -47,6 +48,7 @@ macro_rules! with_command_data {
             LynxCommand::LynxGetBulkDataResponse($x) => $body,
             LynxCommand::LynxSetMotorPowerCommand($x) => $body,
             LynxCommand::LynxSetServoPulseWidthCommand($x) => $body,
+            LynxCommand::LynxSetServoEnableCommand($x) => $body,
             LynxCommand::LynxSetMotorChannelEnableCommand($x) => $body,
             LynxCommand::LynxGetMotorChannelModeCommand($x) => $body,
             LynxCommand::LynxGetMotorChannelModeResponse($x) => $body,
@@ -157,6 +159,8 @@ impl LynxCommandData {
             LynxSetMotorPowerCommand(cmd)
         } else if let Some(cmd) = LynxSetServoPulseWidthCommandData::from_bytes(id, data, dest_addr) {
             LynxSetServoPulseWidthCommand(cmd)
+        } else if let Some(cmd) = LynxSetServoEnableCommandData::from_bytes(id, data, dest_addr) {
+            LynxSetServoEnableCommand(cmd)
         } else if let Some(cmd) = LynxSetMotorChannelEnableCommandData::from_bytes(id, data, dest_addr) {
             LynxSetMotorChannelEnableCommand(cmd)
         } else if let Some(cmd) = LynxGetMotorChannelModeCommandData::from_bytes(id, data, dest_addr) {

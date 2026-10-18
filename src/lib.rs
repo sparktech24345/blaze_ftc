@@ -44,6 +44,30 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static PROXY: OnceLock<Proxy> = OnceLock::new();
 static HUB_0: OnceLock<LynxHub> = OnceLock::new();
 static HUB_1: OnceLock<LynxHub> = OnceLock::new();
+type ServoCommandRequest = (&'static LynxHub, [f64; 6]);
+static SERVO_COMMAND_SENDER: OnceLock<Sender<ServoCommandRequest>> = OnceLock::new();
+
+fn initialize_servo_command_worker() {
+    SERVO_COMMAND_SENDER.get_or_init(|| {
+        let (sender, receiver) = unbounded::<ServoCommandRequest>();
+        std::thread::Builder::new()
+            .name("blaze-servo-commands".to_string())
+            .spawn(move || {
+                while let Ok((hub, positions)) = receiver.recv() {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        hub.send_servo_commands(positions)
+                    }))
+                    .is_err()
+                    {
+                        log::error!("servo command worker panicked while sending a command");
+                    }
+                }
+            })
+            .expect("failed to start servo command worker");
+        sender
+    });
+}
+
 fn log_fd_info(fd: &RawFd) -> std::io::Result<Option<String>> {
     // ---- Origin / source file ----
     // /proc/self/fd/<fd> symlink points to the actual file/device
@@ -153,6 +177,7 @@ fn initializeMostHw(env: &mut Env, telemetry: JObject) -> Result<(), jni::errors
             log::info!("485SET EXPANSION HUB: {:?}", HUB_1.get());
         }
     } else { log::info!("No expansion hub."); }
+    initialize_servo_command_worker();
     Ok(())
 }
 fn initializeUsbExhub(it: &(HubLocation, i32)) {
@@ -480,6 +505,33 @@ pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_setMotorPowers(
         }
         //log::info!("No module found! m{} p{} pow{}", module, port, power)
     }, "set motor powers from java");
+}
+
+#[unsafe(no_mangle)] // ro.sparktech24345.logicore.blaze
+pub extern "system" fn Java_ro_sparktech24345_logicore_blaze_SparkBlazeFTC_setServoPowers(
+    _env: EnvUnowned, _class: JClass, module: jint,
+    position0: jdouble, position1: jdouble, position2: jdouble,
+    position3: jdouble, position4: jdouble, position5: jdouble
+) {
+    catch(|| {
+        let positions = [position0, position1, position2, position3, position4, position5];
+        let hub = [&HUB_0, &HUB_1]
+            .into_iter()
+            .filter_map(|hub| hub.get())
+            .find(|hub| hub.module.module_addr == module as u8);
+        let Some(hub) = hub else {
+            log::error!("cannot set servo powers: no initialized hub with module address {}", module);
+            return;
+        };
+        log::trace!("sending servo positions {:?} to module {}", positions, module);
+        let Some(sender) = SERVO_COMMAND_SENDER.get() else {
+            log::error!("cannot set servo powers: servo command worker is not initialized");
+            return;
+        };
+        if sender.send((hub, positions)).is_err() {
+            log::error!("cannot set servo powers: servo command worker has stopped");
+        }
+    }, "set servo powers from java");
 }
 
 #[unsafe(no_mangle)]
