@@ -44,7 +44,10 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static PROXY: OnceLock<Proxy> = OnceLock::new();
 static HUB_0: OnceLock<LynxHub> = OnceLock::new();
 static HUB_1: OnceLock<LynxHub> = OnceLock::new();
-type ServoCommandRequest = (&'static LynxHub, [f64; 6]);
+enum ServoCommandRequest {
+    Single(&'static LynxHub, u8, f32),
+    Multiple(&'static LynxHub, [f64; 6]),
+}
 static SERVO_COMMAND_SENDER: OnceLock<Sender<ServoCommandRequest>> = OnceLock::new();
 
 fn initialize_servo_command_worker() {
@@ -53,9 +56,16 @@ fn initialize_servo_command_worker() {
         std::thread::Builder::new()
             .name("blaze-servo-commands".to_string())
             .spawn(move || {
-                while let Ok((hub, positions)) = receiver.recv() {
+                while let Ok(request) = receiver.recv() {
                     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        hub.send_servo_commands(positions)
+                        match request {
+                            ServoCommandRequest::Single(hub, port, position) => {
+                                hub.send_servo_command(port, position);
+                            }
+                            ServoCommandRequest::Multiple(hub, positions) => {
+                                hub.send_servo_commands(positions);
+                            }
+                        }
                     }))
                     .is_err()
                     {
@@ -498,13 +508,41 @@ pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_setMotorPowers(
     _env: EnvUnowned, _class: JClass, module: jint, power0: jdouble, power1: jdouble, power2: jdouble, power3: jdouble
 ) {
     catch(|| {
-        if module == 0 {
-            HUB_0.get().unwrap().send_motor_commands([power0, power1, power2, power3])
-        } else {
-            HUB_1.get().unwrap().send_motor_commands([power0, power1, power2, power3])
-        }
-        //log::info!("No module found! m{} p{} pow{}", module, port, power)
+        let hub = [&HUB_0, &HUB_1]
+            .into_iter()
+            .filter_map(|hub| hub.get())
+            .find(|hub| hub.module.module_addr == module as u8);
+        let Some(hub) = hub else {
+            log::error!("cannot set motor powers: no initialized hub with module address {}", module);
+            return;
+        };
+        hub.send_motor_commands([power0, power1, power2, power3]).expect("could not send motor commands");
     }, "set motor powers from java");
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ro_sparktech24345_logicore_blaze_SparkBlazeFTC_setServoPower(
+    _env: EnvUnowned, _class: JClass, module: jint,
+    port: jint, position: jdouble
+) {
+    catch(|| {
+        let hub = [&HUB_0, &HUB_1]
+            .into_iter()
+            .filter_map(|hub| hub.get())
+            .find(|hub| hub.module.module_addr == module as u8);
+        let Some(hub) = hub else {
+            log::error!("cannot set servo power: no initialized hub with module address {}", module);
+            return;
+        };
+        log::trace!("queueing servo position {} to port {} on module {}", position, port, module);
+        let Some(sender) = SERVO_COMMAND_SENDER.get() else {
+            log::error!("cannot set servo power: servo command worker is not initialized");
+            return;
+        };
+        if sender.send(ServoCommandRequest::Single(hub, port as u8, position as f32)).is_err() {
+            log::error!("cannot set servo power: servo command worker has stopped");
+        }
+    }, "set servo power from java");
 }
 
 #[unsafe(no_mangle)] // ro.sparktech24345.logicore.blaze
@@ -528,7 +566,7 @@ pub extern "system" fn Java_ro_sparktech24345_logicore_blaze_SparkBlazeFTC_setSe
             log::error!("cannot set servo powers: servo command worker is not initialized");
             return;
         };
-        if sender.send((hub, positions)).is_err() {
+        if sender.send(ServoCommandRequest::Multiple(hub, positions)).is_err() {
             log::error!("cannot set servo powers: servo command worker has stopped");
         }
     }, "set servo powers from java");
