@@ -49,7 +49,11 @@ impl Robot {
     pub fn new(hub_0: &'static LynxHub, hub_1: Option<&'static LynxHub>,
                gamepad_receiver: &'static Receiver<(Vec<u8>, Vec<u8>)>, telemetry: &'static Telemetry,
                initializer: fn(&mut Robot) -> ())-> Robot {
-        Self::kill_channel();
+        //a kill sent while no robot was running (e.g. an opmode stopped during init) must not stop this one.
+        //java only calls close after run returns, so anything already in the channel is stale
+        while Self::kill_channel().1.try_recv().is_ok() {
+            log::info!("dropping stale kill message");
+        }
         Self::is_running().store(true, Ordering::SeqCst);
         Robot {
             hub_0,
@@ -145,6 +149,12 @@ impl Robot {
         });
     }
     fn run(&self) {
+        //select! picks randomly between ready channels, so without this a stop request could wait behind a
+        //pile of bulk reads whose handlers keep writing motor powers while the SDK is trying to stop the robot
+        if Self::kill_channel().1.try_recv().is_ok() {
+            self.on_kill_signal();
+            return;
+        }
         let never = never();
         select! {
             recv(self.target_receiver.as_ref().unwrap()) -> msg => {
@@ -182,28 +192,30 @@ impl Robot {
                 });
             }
             recv(Self::kill_channel().1) -> _ => {
-                log::info!("STOPPING OPMODE!");
-                //should stop us from running
-                Self::is_running().store(false, Ordering::SeqCst);
-                log::info!("Opmode status --- running: {}", Self::is_running().load(Ordering::SeqCst));
-                if let DirectProxy(proxy) = &self.hub_0.sdk_proxy {//clean up reactors in proxies
-                    proxy.remove_interceptors();
-                }
-                if let Some(hub) = &self.hub_1 {
-                    if let DirectProxy(proxy) = &hub.sdk_proxy {
-                        proxy.remove_interceptors();
-                    }
-                }
-                for i in &self.kill_signal_txs {
-                    log::info!("killing... {:?}", i.send(()));
-                    let _ = i.send(());//just swallow any disconnect errors
-                }
-                for i in &self.on_kill_handlers {
-                    i.lock().unwrap().on_kill(&self);
-                }
-                reset_properties();
+                self.on_kill_signal();
             }
         }
+    }
+    fn on_kill_signal(&self) {
+        log::info!("STOPPING OPMODE!");
+        //should stop us from running
+        Self::is_running().store(false, Ordering::SeqCst);
+        log::info!("Opmode status --- running: {}", Self::is_running().load(Ordering::SeqCst));
+        if let DirectProxy(proxy) = &self.hub_0.sdk_proxy {//clean up reactors in proxies
+            proxy.remove_interceptors();
+        }
+        if let Some(hub) = &self.hub_1 {
+            if let DirectProxy(proxy) = &hub.sdk_proxy {
+                proxy.remove_interceptors();
+            }
+        }
+        for i in &self.kill_signal_txs {
+            log::info!("killing... {:?}", i.send(()));//just swallow any disconnect errors
+        }
+        for i in &self.on_kill_handlers {
+            i.lock().unwrap().on_kill(&self);
+        }
+        reset_properties();
     }
     fn get_hub_1_receiver<'a>(&self, never: &'a Receiver<Packet>) -> &'a Receiver<Packet> {
         match self.hub_1 {
@@ -353,7 +365,8 @@ impl Robot {
     pub fn get_property(&self, key: &str) -> Option<String> {
         get_prop(key)
     }
-    pub fn get_properties(&self, key: &str) -> Vec<String> {
+    ///the names of all properties java has given us
+    pub fn get_properties(&self, _key: &str) -> Vec<String> {
         get_property_names()
     }
     pub fn check_property_names(&self, keys: &[&str]) -> bool {
@@ -434,7 +447,8 @@ impl MainThread {
     pub fn try_wait_for_next_status(&mut self, timeout: Duration) -> Option<TypeId> {
         let x = self.state_receiver.recv_timeout(timeout);
         if let Ok(x) = x {
-            let td = (*x).type_id();
+            //careful: (*x).type_id() would be the TypeId of `dyn ThreadSafe` itself. go through as_any for the real type
+            let td = x.as_any().type_id();
             self.state.insert(td, x.clone_box());
             self.process(x);
             Some(td)
@@ -552,4 +566,26 @@ pub trait ThreadSafe: Send + Sync + 'static {
 pub use unsafe_any;
 unsafe impl UnsafeAnyExt for dyn ThreadSafe {
 
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, PartialEq, Debug)]
+    struct Position(f64);
+    #[derive(Clone, PartialEq, Debug)]
+    struct Velocity(f64);
+
+    #[test]
+    fn statuses_are_stored_by_their_concrete_type() {
+        let (target_tx, _target_rx) = unbounded();
+        let (state_tx, state_rx) = unbounded::<Box<dyn ThreadSafe>>();
+        let mut main = MainThread::new(target_tx, state_rx, None, Telemetry::disconnected(), vec![]);
+        state_tx.send(Box::new(Position(1.0))).unwrap();
+        state_tx.send(Box::new(Velocity(2.0))).unwrap();
+        assert_eq!(main.try_wait_for_next_status(Duration::ZERO), Some(TypeId::of::<Position>()));
+        assert_eq!(main.try_wait_for_next_status(Duration::ZERO), Some(TypeId::of::<Velocity>()));
+        assert_eq!(main.get_status::<Position>(), Some(Position(1.0)));
+        assert_eq!(main.get_status::<Velocity>(), Some(Velocity(2.0)));
+    }
 }

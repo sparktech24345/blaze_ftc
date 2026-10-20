@@ -54,7 +54,7 @@ impl CommandData for AckData {
         StandardCommands::ACK as u16
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if Self::command_number(id) == StandardCommands::ACK as u16 {
+        if Self::command_number(id) == StandardCommands::ACK as u16 && data.len() >= 1 {
             Some(Self {
                 attention_required: data[0] != 0,
             })
@@ -125,17 +125,21 @@ pub struct NackData {
     pub(crate) reason_code: u8
 }
 impl NackData {
+    ///panics if the hub sent a reason code we don't know about. see try_reason
     pub fn reason(&self) -> StandardReasonCode {
-        StandardReasonCode::try_from(self.reason_code).expect("could not get reason code")
+        self.try_reason().expect("could not get reason code")
+    }
+    pub fn try_reason(&self) -> Option<StandardReasonCode> {
+        StandardReasonCode::try_from(self.reason_code).ok()
     }
 }
 impl Display for NackData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let reason = match StandardReasonCode::try_from(self.reason_code) {
-            Ok(it) => {it}
-            Err(_) => {panic!("could not parse NACK reason code {}", self.reason_code)}
-        };
-        write!(f, "Nack[code:{},reason:{:?}]", self.reason_code, reason)
+        //never panic here: packets get formatted in log messages all over the place
+        match self.try_reason() {
+            Some(reason) => write!(f, "Nack[code:{},reason:{:?}]", self.reason_code, reason),
+            None => write!(f, "Nack[code:{},reason:unknown]", self.reason_code),
+        }
     }
 }
 impl Into<Vec<u8>> for NackData {
@@ -148,7 +152,7 @@ impl CommandData for NackData {
         StandardCommands::NACK as u16
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if Self::command_number(id) == StandardCommands::NACK as u16 {
+        if Self::command_number(id) == StandardCommands::NACK as u16 && data.len() >= 1 {
             Some(Self {
                reason_code: data[0]
             })
@@ -178,7 +182,7 @@ impl CommandData for KeepAliveData {
         StandardCommands::KeepAlive as u16
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if Self::command_number(id) == StandardCommands::KeepAlive as u16 {
+        if Self::command_number(id) == StandardCommands::KeepAlive as u16 && data.is_empty() {
             Some(Self {})
         } else {
             None
@@ -255,7 +259,7 @@ impl CommandData for QueryInterfaceResponseData {
         StandardCommands::QueryInterface as u16 | RESPONSE_BIT
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == (StandardCommands::QueryInterface as u16 | RESPONSE_BIT) {
+        if id == (StandardCommands::QueryInterface as u16 | RESPONSE_BIT) && data.len() >= 4 {
             Some(Self {
                 command_number_first: u16::from_le_bytes(data[0..2].try_into().unwrap()),
                 number_of_commands: u16::from_le_bytes(data[2..4].try_into().unwrap()),

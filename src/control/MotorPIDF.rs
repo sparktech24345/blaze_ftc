@@ -10,7 +10,7 @@ pub struct MotorPIDF {
 impl MotorPIDF {
     pub fn new(p: f32, i: f32, d: f32, f: f32) -> MotorPIDF {
         let limit = 1.0 - f;
-        let mut pid = Pid::new(0.0, limit);
+        let mut pid = Pid::new(0.0_f32, limit);
         if p != 0.0 {
             pid.p(p, limit);
         }

@@ -1,4 +1,4 @@
-use crate::serialization::packet::{Packet, Packets, FRAME_BYTES};
+use crate::serialization::packet::{Packet, Packets, FRAME_BYTES, MAX_PACKET_LEN, MIN_PACKET_LEN};
 use crate::telemetry::telemetry::{get_class_loader, load_class};
 use crate::{catch, BLAZEFTC_CLASS, JAVA_VM, RUNNING};
 use core::slice;
@@ -109,13 +109,17 @@ fn do_read_thread(env: &mut Env, blazeftc: &JClass, vec: &mut [u8], bytes: &JByt
     //either the next two bytes (the length, a u16), or all four if we were already locked
     do_read(env, blazeftc, vec, bytes, pos, 4 - pos);
     let packet_len = u16::from_le_bytes(vec[2..4].try_into().expect("could not convert bytes type")) as usize;
-    do_read(env, blazeftc, vec, bytes, 4, (packet_len - 4));
+    if packet_len < MIN_PACKET_LEN || packet_len > MAX_PACKET_LEN.min(vec.len()) {
+        //corrupted length: packet_len - 4 would underflow, or we'd read past the buffer. resync instead
+        log::info!("usb read impossible packet length {}", packet_len);
+        return None;
+    }
+    do_read(env, blazeftc, vec, bytes, 4, packet_len - 4);
     let pack = Packet::from_data(&vec[0..packet_len]);
-    println!("USB READ PACKET!!! {:?}", pack);
+    log::trace!("USB READ PACKET!!! {:?}", pack);
     pack
 }
 fn do_read(env: &mut Env, blaze: &JClass, vec: &mut [u8], bytes: &JByteArray, pos: usize, len: usize) {
-    let mut tmp_vec = Vec::with_capacity(len);
     match env.call_static_method(blaze,
                                      jni_str!("readFromUsbExact"),
                                      jni_sig!("([BII)V"),
@@ -127,7 +131,6 @@ fn do_read(env: &mut Env, blaze: &JClass, vec: &mut [u8], bytes: &JByteArray, po
         }).flatten() {
         Ok(it) => {
             for i in 0..len {
-                tmp_vec.push(it[i] as u8);
                 vec[pos + i] = it[i] as u8
             }
         }
@@ -138,5 +141,5 @@ fn do_read(env: &mut Env, blaze: &JClass, vec: &mut [u8], bytes: &JByteArray, po
             panic!("Failure while: {}", "USB Read Thread")
         }
     }
-    println!("just read from usb bytes: {:?}", tmp_vec)
+    log::trace!("just read from usb bytes: {:?}", &vec[pos..pos + len])
 }

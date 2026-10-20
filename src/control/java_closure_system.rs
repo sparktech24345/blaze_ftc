@@ -106,7 +106,7 @@ pub struct JNICrossOctoQuadHandler {
 impl I2CDeviceHandler<OctoQuadI2C, OctoQuadSnapshot, OctoQuadRegisters> for JNICrossOctoQuadHandler {
     fn handle(&mut self, _: &Robot, device: &mut Box<OctoQuadI2C>, data: &OctoQuadSnapshot) {
         if self.datas < 5 {
-            log::info!("got a pinpoint data! {}", self.datas)
+            log::info!("got an octoquad data! {}", self.datas)
         }
         handle_keep_sending(&self.resend_rx, &mut self.sending);
         if self.sending && !self.scheduled {
@@ -133,7 +133,7 @@ impl JNICrossOctoQuadHandler {
             robot.hub_0
         } else { robot.hub_1? };
 
-        log::info!("abt to get pinpoint bus id");
+        log::info!("abt to get octoquad bus id");
         let mut octoquad = if let Ok(bus_id) = robot.get_property("internalOctoquadBus")?.parse::<u8>() {
             //0 <= bus_id <= 4, I think
             //i2c addr is hardcoded
@@ -151,7 +151,7 @@ impl JNICrossOctoQuadHandler {
             orders.push(order);
             true
         } else {
-            log::info!("firing pinpoint!");
+            log::info!("firing octoquad!");
             octoquad.fire_bulk_read_request();
             false
         };
@@ -290,7 +290,8 @@ fn java_thread<T>(env: &mut Env, name: String, resend_tx: Sender<bool>, data_rx:
         .new_string(name)
         .expect("could not create java string - pinpoint jni");
 
-    let arr = env.byte_array_from_slice(&vec![0b0; 40])
+    //java has always been handed (at least) 40 bytes, so keep that, but grow for bigger data (e.g. octoquad)
+    let mut arr = env.byte_array_from_slice(&vec![0b0; 40])
         .expect("could not create java bytes - pinpoint jni");
     let mut running = true;
     while running {
@@ -304,9 +305,23 @@ fn java_thread<T>(env: &mut Env, name: String, resend_tx: Sender<bool>, data_rx:
                     while !data_rx.is_empty() {
                         msg = data_rx.recv();
                     }
-                    let msg: T = msg.unwrap();
+                    let msg: T = match msg {
+                        Ok(it) => it,
+                        Err(_) => {
+                            //the handler feeding us is gone (the robot shut down). this is a normal way to stop,
+                            //panicking here would go through catch() and take the hardware threads down with it
+                            log::info!("java thread data channel closed, stopping");
+                            break;
+                        }
+                    };
                     let in_bytes = msg.into();
                     let in_bytes: Vec<jbyte> = in_bytes.into_iter().map(|it| it as jbyte).collect();
+                    if in_bytes.len() > arr.len(env).expect("could not get java byte array length") {
+                        let bigger = env.byte_array_from_slice(&vec![0b0; in_bytes.len()])
+                            .expect("could not create java bytes - pinpoint jni");
+                        //this thread never pops its jni frame, so free local refs we're done with
+                        env.delete_local_ref(std::mem::replace(&mut arr, bigger));
+                    }
                     arr.set_region(env, 0, in_bytes.as_slice())
                         .expect("could not set region in pinpoint 0");
 

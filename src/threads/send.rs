@@ -43,6 +43,9 @@ where
                         return;
                     }
                 };
+                if x.is_empty() {
+                    continue;
+                }
                 log::trace!(
                     "writing {} packets: ref num:{} len:{}, command:{}",
                     x.len(),

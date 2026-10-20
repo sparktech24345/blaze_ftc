@@ -1,4 +1,3 @@
-#![feature(associated_type_defaults)]
 
 pub mod serialization;
 pub mod threads;
@@ -10,7 +9,7 @@ pub extern crate jni;
 extern crate core;
 //pub extern crate self as blaze_ftc;
 
-use jni::sys::{jboolean, jbyte, jbyteArray, jdouble, jstring, va_list};
+use jni::sys::{jboolean, jbyte, jbyteArray, jdouble, jsize, jstring, va_list};
 use std::thread::sleep;
 
 /*fn unwrap<T>(x: Option<T>) -> T where T: Sized
@@ -57,19 +56,44 @@ fn initialize_servo_command_worker() {
             .name("blaze-servo-commands".to_string())
             .spawn(move || {
                 while let Ok(request) = receiver.recv() {
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        match request {
+                    //only the newest position of each servo matters. coalesce everything that queued up while we
+                    //were sending, otherwise a slow bus (RS485) builds an ever-growing backlog and servos lag further and further behind
+                    let mut pending: Vec<(&'static LynxHub, [f64; 6])> = vec![];
+                    for request in std::iter::once(request).chain(receiver.try_iter()) {
+                        let (hub, positions) = match request {
                             ServoCommandRequest::Single(hub, port, position) => {
-                                hub.send_servo_command(port, position);
+                                if port as usize >= 6 || !position.is_finite() {
+                                    log::error!("cannot set servo {} to position {}", port, position);
+                                    continue;
+                                }
+                                let mut positions = [f64::NAN; 6];
+                                positions[port as usize] = position as f64;
+                                (hub, positions)
                             }
-                            ServoCommandRequest::Multiple(hub, positions) => {
-                                hub.send_servo_commands(positions);
+                            ServoCommandRequest::Multiple(hub, positions) => (hub, positions),
+                        };
+                        let entry = match pending.iter().position(|(it, _)| std::ptr::eq(*it, hub)) {
+                            Some(i) => &mut pending[i].1,
+                            None => {
+                                pending.push((hub, [f64::NAN; 6]));
+                                &mut pending.last_mut().unwrap().1
+                            }
+                        };
+                        //NaN means "leave this servo alone", same as for send_servo_commands
+                        for (old, new) in entry.iter_mut().zip(positions) {
+                            if new.is_finite() {
+                                *old = new;
                             }
                         }
-                    }))
-                    .is_err()
-                    {
-                        log::error!("servo command worker panicked while sending a command");
+                    }
+                    for (hub, positions) in pending {
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            hub.send_servo_commands(positions);
+                        }))
+                        .is_err()
+                        {
+                            log::error!("servo command worker panicked while sending a command");
+                        }
                     }
                 }
             })
@@ -243,12 +267,15 @@ static TELEMETRY: OnceLock<Telemetry> = OnceLock::new();
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_run(
-    _env: EnvUnowned,
+    mut env: EnvUnowned,
     _class: JClass,
     to_run: jint
 ) {
-    catch(|| {
+    //with_env turns panics into java exceptions. a panic unwinding out of an extern "system" fn aborts the whole app
+    env.with_env(|_| -> Result<_, jni::errors::Error> { catch(|| {
         set_allowed_to_send_dangerous_packets(true);
+        //the previous opmode (or the SDK resetting hardware after it) may have changed motor powers behind our back
+        [&HUB_0, &HUB_1].into_iter().filter_map(|hub| hub.get()).for_each(|hub| hub.invalidate_motor_cache());
         let hub_0 = HUB_0.get().expect("no packet receiver");
         let hub_1 = HUB_1.get();//may not exist, don't expect it
         let gp_channels = GAMEPAD_CHANNELS.get().expect("failed to unwrap gamepad channels");
@@ -260,7 +287,7 @@ pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_run(
             log::info!("hub_1 id: {:?}", h1.module);
         }
         function(hub_0, hub_1, &gp_channels.1, telemetry, to_run);
-    }, "setup robot");
+    }, "setup robot"); Ok(()) }).resolve::<ThrowRuntimeExAndDefault>();
 }
 type InitFunction = fn(&'static LynxHub, Option<&'static LynxHub>,
                        &'static Receiver<(Vec<u8>, Vec<u8>)>, &'static Telemetry, i32) -> ();
@@ -489,9 +516,9 @@ pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_sendProperty(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_setMotorPower(
-    _env: EnvUnowned, _class: JClass, module: jint, port: jint, power: jdouble
+    mut env: EnvUnowned, _class: JClass, module: jint, port: jint, power: jdouble
 ) {
-    catch(|| {
+    env.with_env(|_| -> Result<_, jni::errors::Error> { catch(|| {
         [&HUB_0, &HUB_1].into_iter().for_each(move |it| {
             if let Some(it) = it.get() {
                 if it.module.module_addr == module as u8 {
@@ -500,14 +527,14 @@ pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_setMotorPower(
             }
         });
         //log::info!("No module found! m{} p{} pow{}", module, port, power)
-    }, "set motor power from java");
+    }, "set motor power from java"); Ok(()) }).resolve::<ThrowRuntimeExAndDefault>();
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_setMotorPowers(
-    _env: EnvUnowned, _class: JClass, module: jint, power0: jdouble, power1: jdouble, power2: jdouble, power3: jdouble
+    mut env: EnvUnowned, _class: JClass, module: jint, power0: jdouble, power1: jdouble, power2: jdouble, power3: jdouble
 ) {
-    catch(|| {
+    env.with_env(|_| -> Result<_, jni::errors::Error> { catch(|| {
         let hub = [&HUB_0, &HUB_1]
             .into_iter()
             .filter_map(|hub| hub.get())
@@ -516,16 +543,18 @@ pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_setMotorPowers(
             log::error!("cannot set motor powers: no initialized hub with module address {}", module);
             return;
         };
-        hub.send_motor_commands([power0, power1, power2, power3]).expect("could not send motor commands");
-    }, "set motor powers from java");
+        if hub.send_motor_commands([power0, power1, power2, power3]).is_none() {
+            log::error!("could not send motor powers to module {}", module);
+        }
+    }, "set motor powers from java"); Ok(()) }).resolve::<ThrowRuntimeExAndDefault>();
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_ro_sparktech24345_logicore_blaze_SparkBlazeFTC_setServoPower(
-    _env: EnvUnowned, _class: JClass, module: jint,
+    mut env: EnvUnowned, _class: JClass, module: jint,
     port: jint, position: jdouble
 ) {
-    catch(|| {
+    env.with_env(|_| -> Result<_, jni::errors::Error> { catch(|| {
         let hub = [&HUB_0, &HUB_1]
             .into_iter()
             .filter_map(|hub| hub.get())
@@ -542,16 +571,16 @@ pub extern "system" fn Java_ro_sparktech24345_logicore_blaze_SparkBlazeFTC_setSe
         if sender.send(ServoCommandRequest::Single(hub, port as u8, position as f32)).is_err() {
             log::error!("cannot set servo power: servo command worker has stopped");
         }
-    }, "set servo power from java");
+    }, "set servo power from java"); Ok(()) }).resolve::<ThrowRuntimeExAndDefault>();
 }
 
 #[unsafe(no_mangle)] // ro.sparktech24345.logicore.blaze
 pub extern "system" fn Java_ro_sparktech24345_logicore_blaze_SparkBlazeFTC_setServoPowers(
-    _env: EnvUnowned, _class: JClass, module: jint,
+    mut env: EnvUnowned, _class: JClass, module: jint,
     position0: jdouble, position1: jdouble, position2: jdouble,
     position3: jdouble, position4: jdouble, position5: jdouble
 ) {
-    catch(|| {
+    env.with_env(|_| -> Result<_, jni::errors::Error> { catch(|| {
         let positions = [position0, position1, position2, position3, position4, position5];
         let hub = [&HUB_0, &HUB_1]
             .into_iter()
@@ -569,7 +598,7 @@ pub extern "system" fn Java_ro_sparktech24345_logicore_blaze_SparkBlazeFTC_setSe
         if sender.send(ServoCommandRequest::Multiple(hub, positions)).is_err() {
             log::error!("cannot set servo powers: servo command worker has stopped");
         }
-    }, "set servo powers from java");
+    }, "set servo powers from java"); Ok(()) }).resolve::<ThrowRuntimeExAndDefault>();
 }
 
 #[unsafe(no_mangle)]
@@ -598,7 +627,8 @@ pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_read(
         if tmp > 0 {
             let data = &temp[..tmp];
             log::trace!("-EVADEBUG- read bytes to java: {:?}", data);
-            buffer.set_region(env, 0, &data.into_iter().map(|x| *x as i8).collect::<Vec<jbyte>>())?;
+            //InputStream.read(b, off, len) must write starting at b[off]
+            buffer.set_region(env, off as jsize, &data.into_iter().map(|x| *x as i8).collect::<Vec<jbyte>>())?;
         }
 
         Ok(tmp as jint)
@@ -606,12 +636,18 @@ pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_read(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_close(_env: EnvUnowned, _class: JClass) {
-    log::info!("trying to stop...");
-    set_allowed_to_send_dangerous_packets(false);
-    KILL_CHANNEL.get().expect("could not access kill channel???")
-        .0.send(()).expect("could not send kill message???");
-    log::info!("sent stop command");
+pub extern "system" fn Java_dev_anygeneric_blazeftc_BlazeFTC_close(mut env: EnvUnowned, _class: JClass) {
+    env.with_env(|_| -> Result<_, jni::errors::Error> {
+        log::info!("trying to stop...");
+        set_allowed_to_send_dangerous_packets(false);
+        //the SDK resets the motors once the opmode stops, so our cached powers are about to be wrong
+        [&HUB_0, &HUB_1].into_iter().filter_map(|hub| hub.get()).for_each(|hub| hub.invalidate_motor_cache());
+        //kill_channel() initializes the channel if needed: close is also called when an opmode is
+        //stopped during init, before run ever created a Robot. Robot::new drops stale kill messages.
+        Robot::kill_channel().0.send(()).expect("could not send kill message???");
+        log::info!("sent stop command");
+        Ok(())
+    }).resolve::<ThrowRuntimeExAndDefault>();
 }
 
 use crate::serialization::command_utils::Module;
@@ -655,29 +691,54 @@ impl ElapsedTimer {
 use num_traits::{Num, FromPrimitive};
 use termios::{cfmakeraw, tcsetattr, Termios, IXANY, IXOFF, IXON, OPOST, TCSANOW, VMIN, VTIME};
 use crate::control::hardware::{LynxHub, UnderlyingHw};
-use crate::control::robot::{IS_RUNNING, KILL_CHANNEL};
+use crate::control::robot::{Robot, IS_RUNNING};
 use crate::threads::usb_handler::{start_usb_read_thread, start_usb_write_thread};
 
 pub struct MovingAverage<T> where T: Num + FromPrimitive + Copy {
     data: Vec<T>,
     total: T,
-    index: usize
+    index: usize,
+    ///how many slots hold real samples. until the window fills up, the empty slots must not drag the average down
+    filled: usize
 }
 impl<T> MovingAverage<T> where T: Num + FromPrimitive + Copy {
     pub fn new(size: usize) -> MovingAverage<T> {
         if size == 0 {
             panic!("moving average size cannot be zero!");
         }
-        MovingAverage {data: vec![T::zero(); size], total: T::zero(), index: 0}
+        MovingAverage {data: vec![T::zero(); size], total: T::zero(), index: 0, filled: 0}
     }
+    ///zero until the first update
     pub fn avg(&self) -> T {
-        self.total / T::from_usize(self.data.len()).expect("cannot convert number from usize")
+        if self.filled == 0 {
+            return T::zero();
+        }
+        self.total / T::from_usize(self.filled).expect("cannot convert number from usize")
     }
     pub fn update(&mut self, new: T) {
         self.total = self.total - self.data[self.index];
         self.total = self.total + new;
         self.data[self.index] = new;
+        self.filled = (self.filled + 1).min(self.data.len());
 
         self.index = (self.index + 1) % self.data.len()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moving_average_ignores_empty_slots() {
+        let mut avg = MovingAverage::<u32>::new(4);
+        assert_eq!(avg.avg(), 0);
+        avg.update(10);
+        assert_eq!(avg.avg(), 10);
+        avg.update(20);
+        assert_eq!(avg.avg(), 15);
+        for _ in 0..4 {
+            avg.update(8);
+        }
+        assert_eq!(avg.avg(), 8);
     }
 }

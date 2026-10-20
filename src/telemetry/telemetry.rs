@@ -63,6 +63,11 @@ impl Telemetry {
         });
         Telemetry {send: tx}
     }
+    ///a telemetry that goes nowhere, for tests that can't start a JVM
+    #[cfg(test)]
+    pub(crate) fn disconnected() -> Telemetry {
+        Telemetry {send: unbounded().0}
+    }
     fn send(&self, td: TelemetryData) {
         self.send.send(td).expect("could not get telemetry channel!")
     }
@@ -117,7 +122,15 @@ impl Telemetry {
                 timer.push(cache);
                 timer.reset_last_sent();
                 if running {
-                    Self::send_all_telemetry(cache, env, obj).unwrap();
+                    //a failed telemetry update is not worth a panic: catch() would stop every hardware thread with it
+                    if let Err(it) = Self::send_all_telemetry(cache, env, obj) {
+                        log::error!("could not send telemetry: {}", it);
+                        //a pending java exception would make every later jni call on this thread fail
+                        if env.exception_check() {
+                            env.exception_describe();
+                            env.exception_clear();
+                        }
+                    }
                 } else {
                     sleep(Duration::from_millis(75));
                     cache.clear();//do not keep old data, obv
@@ -271,7 +284,7 @@ impl TelemetryTimers {
         self.last_submitted.duration_reset();
     }
     fn need_to_send(&self) -> bool {
-        self.last_submitted.duration().subsec_millis() > 62//16 hz
+        self.last_submitted.duration().as_millis() > 62//16 hz
     }
     fn push(&self, _data: &mut Vec<TelemetryData>) {
         //data[0].data = TelemetryType::F64(self.wait_time_avg.avg() as f64);

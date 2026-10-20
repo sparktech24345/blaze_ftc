@@ -75,7 +75,8 @@ impl Module {
             return None; //One or the other
         }
         let cmd_id = command_number(packet_id);
-        if cmd_id > self.number_command_first + self.number_of_commands
+        //valid commands are number_command_first..number_command_first + number_of_commands (exclusive)
+        if cmd_id >= self.number_command_first + self.number_of_commands
             || cmd_id < self.number_command_first
         {
             None
@@ -84,7 +85,7 @@ impl Module {
         }
     }
     pub const fn is_module_command(&self, packet_id: u16) -> Option<u16> {
-        if packet_id > self.number_command_first + self.number_of_commands
+        if packet_id >= self.number_command_first + self.number_of_commands
             || packet_id < self.number_command_first
         {
             None

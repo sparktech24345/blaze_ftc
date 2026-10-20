@@ -23,10 +23,15 @@ pub trait I2CDevice<T, R> : Send + Sync + UnwindSafe + RefUnwindSafe where R: In
     ///hub, bus, i2c addr
     fn get_location(&self) -> (&'static LynxHub, u8, u8);
     fn get_read_mode(&self) -> u8;
+    ///how many bytes a read has to return before it can be turned into a T. shorter reads (e.g. the device
+    ///NACKed the transaction) are dropped instead of being handed to T::from. 0 means don't check.
+    fn expected_read_len(&self) -> usize { 0 }
     fn write_data_i(lynx_hub: &'static LynxHub, i2c_bus: u8, i2c_addr_7bit: u8, register: u8, data: &[u8]) {
         let mut payload = vec![register; data.len() + 1];
         payload[1..].copy_from_slice(data);
-        let packet = if data.len() == 1 {
+        //a single byte write sends just the register. anything with data needs the multi byte write, since
+        //payload[0] is the register, so a single byte write of a 1 byte register would silently drop the data
+        let packet = if data.is_empty() {
             LynxCommand::LynxI2CSingleByteWriteCommand(LynxI2CSingleByteWriteCommandData {
                 i2c_bus,
                 i2c_addr_7bit,
@@ -76,6 +81,11 @@ pub trait I2CDevice<T, R> : Send + Sync + UnwindSafe + RefUnwindSafe where R: In
                     let resp = if let Command::LynxCommand(it) = packet.payload_data && let LynxCommand::LynxI2CReadStatusQueryResponse(it) = it.command {
                         it
                     } else {panic!("wierdness has happened")};
+                    if resp.data.len() < self.expected_read_len() {
+                        log::info!("i2c read {} only returned {} of {} bytes (status {}), dropping it",
+                            packet.reference_number, resp.data.len(), self.expected_read_len(), resp.i2c_status);
+                        return I2CDeviceResult::Nack(format!("short read, status {}", resp.i2c_status));
+                    }
                     let mode = self.get_read_mode();
                     let data = T::from((mode, resp.data));
                     //log::trace!("i2c packet {} was data! {:?}", packet.reference_number, data);

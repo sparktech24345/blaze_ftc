@@ -111,7 +111,7 @@ impl Display for Command {
     }
 }
 pub fn null_term_to_string(x: &Vec<u8>) -> String {
-    String::from_utf8(x[..x.iter().position(|&b| b == 0).unwrap_or(x.len())].to_vec()).unwrap()
+    String::from_utf8_lossy(&x[..x.iter().position(|&b| b == 0).unwrap_or(x.len())]).into_owned()
 }
 impl Into<Vec<u8>> for Command {
     fn into(self) -> Vec<u8> {

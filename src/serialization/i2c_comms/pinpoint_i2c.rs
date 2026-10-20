@@ -36,6 +36,10 @@ impl I2CDevice<PinpointSnapshot, PinpointRegister> for PinpointI2C {
     fn get_read_mode(&self) -> u8 {
         0
     }
+
+    fn expected_read_len(&self) -> usize {
+        PinpointSnapshot::LEN
+    }
 }
 impl PinpointI2C {
     const IN_TO_MM: f32 = 25.4;
@@ -65,8 +69,8 @@ impl PinpointI2C {
         LynxCommand::LynxI2CWriteReadMultipleBytesCommand(LynxI2CWriteReadMultipleBytesCommandData {
             i2c_bus: self.bus,
             i2c_addr_7bit: self.i2c_addr,
-            bytes_to_read: 40,
-            i2c_start_addr: 18,//magic value idk
+            bytes_to_read: PinpointSnapshot::LEN as u8,
+            i2c_start_addr: BulkRead as u8,
         })
     }
     pub fn fire_bulk_read_request(&self) {
@@ -164,6 +168,8 @@ pub struct PinpointSnapshot {
 }
 impl PinpointSnapshot {
     const MM_TO_IN: f32 = 1f32/25.4f32;
+    ///size of a bulk read: 4 i32s and 6 f32s
+    pub const LEN: usize = 40;
     fn new(data: &[u8]) -> PinpointSnapshot {
         let device_status = i32::from_le_bytes(data[0..4].try_into().unwrap());
         let loop_time = i32::from_le_bytes(data[4..8].try_into().unwrap());

@@ -92,10 +92,10 @@ impl CommandData for LynxGetADCCommandData {
     }
 
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 7 {
+        if id == 7 && data.len() == 2 {
             Some(Self {
-                channel: ADCCommandChannel::try_from(data[0]).unwrap(),
-                mode: ADCCommandMode::try_from(data[1]).unwrap(),
+                channel: ADCCommandChannel::try_from(data[0]).ok()?,
+                mode: ADCCommandMode::try_from(data[1]).ok()?,
             })
         } else {
             None
@@ -132,7 +132,7 @@ impl CommandData for LynxGetADCResponseData {
         7 | RESPONSE_BIT
     }
     fn from_bytes(id: u16, data: &[u8], dest_addr: u8) -> Option<Self> {
-        if id == (7 | RESPONSE_BIT) {
+        if id == (7 | RESPONSE_BIT) && data.len() >= 2 {
             Some(LynxGetADCResponseData {
                 value: i16::from_le_bytes(data[0..2].try_into().unwrap()),
             })
@@ -169,7 +169,7 @@ impl CommandData for LynxGetBulkDataCommandData {
         0
     }
     fn from_bytes(id: u16, data: &[u8], dest_addr: u8) -> Option<Self> {
-        if id == 0 {
+        if id == 0 && data.is_empty() {
             Some(LynxGetBulkDataCommandData {})
         } else { None }
     }
@@ -224,7 +224,8 @@ impl MotorData {
 impl Display for LynxGetBulkDataResponseData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let m = self.motors;
-        write!(f, "LynxGetBulkDataResponse[m0p:{}m0v:{},m1p:{},m2p{}, m3p:{}]", m[0].position, m[0].velocity, m[1].position, m[2].position, m[3].position)
+        write!(f, "LynxGetBulkDataResponse[m0p:{},m0v:{},m1p:{},m1v:{},m2p:{},m2v:{},m3p:{},m3v:{}]",
+            m[0].position, m[0].velocity, m[1].position, m[1].velocity, m[2].position, m[2].velocity, m[3].position, m[3].velocity)
     }
 }
 impl LynxGetBulkDataResponseData {
@@ -281,7 +282,7 @@ impl CommandData for LynxGetBulkDataResponseData {
     }
 
     fn from_bytes(id: u16, data: &[u8], dest_addr: u8) -> Option<Self> {
-        if id == (0 | RESPONSE_BIT) {
+        if id == (0 | RESPONSE_BIT) && data.len() >= 34 {
             let digital_inputs = data[0];//read 1 byte
             let positions = Self::read_i32s(data, 1, 4);//read 16 bytes
             let motor_status = data[17];//read 1
@@ -327,7 +328,7 @@ impl CommandData for LynxSetMotorPowerCommandData {
         15
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 15 {
+        if id == 15 && data.len() == 3 {
             Some(LynxSetMotorPowerCommandData { motor: data[0], power: i16::from_le_bytes(data[1..3].try_into().unwrap()) })
         } else { None }
     }
@@ -359,7 +360,7 @@ impl CommandData for LynxSetServoPulseWidthCommandData {
         33
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 33 {
+        if id == 33 && data.len() == 3 {
             Some(LynxSetServoPulseWidthCommandData { servo: data[0], pulse_width: u16::from_le_bytes(data[1..3].try_into().unwrap()) })
         } else { None }
     }
@@ -388,7 +389,7 @@ impl CommandData for LynxSetServoEnableCommandData {
         35
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 35 {
+        if id == 35 && data.len() == 2 {
             Some(LynxSetServoEnableCommandData {
                 servo: data[0],
                 enabled: data[1] != 0,
@@ -453,7 +454,7 @@ impl CommandData for LynxSetMotorChannelEnableCommandData {
         10
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 10 {
+        if id == 10 && data.len() == 2 {
             Some(LynxSetMotorChannelEnableCommandData { motor: data[0], enabled: data[1] != 0 })
         } else { None }
     }
@@ -481,7 +482,7 @@ impl CommandData for LynxGetMotorChannelModeCommandData {
         9
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 9 {
+        if id == 9 && data.len() == 1 {
             Some(LynxGetMotorChannelModeCommandData { motor: data[0] })
         } else { None }
     }
@@ -523,10 +524,10 @@ impl CommandData for LynxGetMotorChannelModeResponseData {
         9 | RESPONSE_BIT
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == (9 | RESPONSE_BIT) {
+        if id == (9 | RESPONSE_BIT) && data.len() >= 2 {
             Some(LynxGetMotorChannelModeResponseData {
-                run_mode: DcMotorRunMode::try_from(data[0]).expect("dc rm fail"),
-                zero_power_behavior: DcMotorZeroPowerBehavior::try_from(data[1]).expect("dc zpm fail")
+                run_mode: DcMotorRunMode::try_from(data[0]).ok()?,
+                zero_power_behavior: DcMotorZeroPowerBehavior::try_from(data[1]).ok()?
             })
         } else { None }
     }
@@ -556,11 +557,11 @@ impl CommandData for LynxSetMotorChannelModeCommandData {
         8
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 8 {
+        if id == 8 && data.len() == 3 {
             Some(LynxSetMotorChannelModeCommandData {
                 motor: data[0],
-                run_mode: DcMotorRunMode::try_from(data[1]).expect("dc rm fail"),
-                zero_power_behavior: DcMotorZeroPowerBehavior::try_from(data[2]).expect("dc zpm fail")
+                run_mode: DcMotorRunMode::try_from(data[1]).ok()?,
+                zero_power_behavior: DcMotorZeroPowerBehavior::try_from(data[2]).ok()?
             })
         } else { None }
     }
@@ -595,7 +596,7 @@ impl CommandData for LynxI2cWriteMultipleBytesCommandData {
         38
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 38 {
+        if id == 38 && data.len() >= 3 && data.len() == 3 + data[2] as usize {
             let length = data[2] as usize;
             let payload = Vec::from(&data[3..length + 3]);
             Some(LynxI2cWriteMultipleBytesCommandData { i2c_bus: data[0], i2c_addr_7bit: data[1], payload })
@@ -627,7 +628,7 @@ impl CommandData for LynxI2CSingleByteWriteCommandData {
         37
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 37 {
+        if id == 37 && data.len() == 3 {
             Some(LynxI2CSingleByteWriteCommandData { i2c_bus: data[0], i2c_addr_7bit: data[1], value: data[2] })
         } else { None }
     }
@@ -656,7 +657,7 @@ impl CommandData for LynxI2CReadStatusQueryCommandData {
         41
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 41 {
+        if id == 41 && data.len() == 1 {
             Some(LynxI2CReadStatusQueryCommandData { i2c_bus: data[0] })
         } else { None }
     }
@@ -687,7 +688,7 @@ impl CommandData for LynxI2CWriteReadMultipleBytesCommandData {
         52
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == 52 {
+        if id == 52 && data.len() == 4 {
             Some(LynxI2CWriteReadMultipleBytesCommandData { i2c_bus: data[0], i2c_addr_7bit: data[1], bytes_to_read: data[2], i2c_start_addr: data[3] })
         } else { None }
     }
@@ -718,7 +719,7 @@ impl CommandData for LynxI2CReadStatusQueryResponseData {
         41 | RESPONSE_BIT
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == (41 | RESPONSE_BIT) {
+        if id == (41 | RESPONSE_BIT) && data.len() >= 2 && data.len() >= 2 + data[1] as usize {
             let len = data[1] as usize;
             Some(LynxI2CReadStatusQueryResponseData { i2c_status: data[0], data: Vec::from(&data[2..2+len]) })
         } else { None }
@@ -748,7 +749,8 @@ pub struct LynxSetMotorPIDFCommandData {
 }
 impl LynxSetMotorPIDFCommandData {
     fn coefficient_to_internal(coefficient: f64) -> i32 {
-        (coefficient.abs() * 65536.0 + 0.5).to_i32().expect("pidf coef. bad0") * coefficient.signum().to_i32().expect("pidf coef. bad1")
+        //`as` saturates (and maps NaN to 0), the firmware can't represent anything bigger anyway
+        ((coefficient.abs() * 65536.0 + 0.5) as i32) * (coefficient.signum() as i32)
     }
     fn internal_to_coefficient(internal: i32) -> f64 {
         internal.to_f64().unwrap() / 65536.0f64
@@ -785,14 +787,14 @@ impl CommandData for LynxSetMotorPIDFCommandData {
     }
 
     fn from_bytes(id: u16, data: &[u8], dest_addr: u8) -> Option<Self> {
-        if id == 51 {
+        if id == 51 && data.len() == 19 {
             let p = i32::from_le_bytes(data[2..6].try_into().unwrap());
             let i = i32::from_le_bytes(data[6..10].try_into().unwrap());
             let d = i32::from_le_bytes(data[10..14].try_into().unwrap());
             let f = i32::from_le_bytes(data[14..18].try_into().unwrap());
             Some(LynxSetMotorPIDFCommandData {
                 motor: data[0],
-                mode: DcMotorRunMode::try_from_primitive(data[1]).expect("pid mode bad"),
+                mode: DcMotorRunMode::try_from_primitive(data[1]).ok()?,
                 proportional: Self::internal_to_coefficient(p),
                 integral: Self::internal_to_coefficient(i),
                 derivative: Self::internal_to_coefficient(d),
@@ -830,7 +832,7 @@ impl CommandData for LynxSetMotorVelocityTargetCommandData {
     }
 
     fn from_bytes(id: u16, data: &[u8], dest_addr: u8) -> Option<Self> {
-        if id == 17 {
+        if id == 17 && data.len() == 3 {
             Some(LynxSetMotorVelocityTargetCommandData {
                 motor: data[0],
                 velocity: i16::from_le_bytes(data[1..3].try_into().unwrap())
@@ -868,7 +870,7 @@ impl CommandData for LynxSetMotorTargetPositionCommandData {
     }
 
     fn from_bytes(id: u16, data: &[u8], dest_addr: u8) -> Option<Self> {
-        if id == 19 {
+        if id == 19 && data.len() == 7 {
             Some(Self {
                 motor: data[0],
                 position: i32::from_le_bytes(data[1..5].try_into().unwrap()),
@@ -895,7 +897,7 @@ impl Into<Vec<u8>> for LynxI2CWriteStatusQueryCommandData {
 }
 impl Display for LynxI2CWriteStatusQueryCommandData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "I2CWriteStatusQueryCommand[i2c_addr:{}]", self.i2c_bus)
+        write!(f, "I2CWriteStatusQueryCommand[bus:{}]", self.i2c_bus)
     }
 }
 impl CommandData for LynxI2CWriteStatusQueryCommandData {
@@ -904,7 +906,7 @@ impl CommandData for LynxI2CWriteStatusQueryCommandData {
     }
 
     fn from_bytes(id: u16, data: &[u8], dest_addr: u8) -> Option<Self> {
-        if id == 42 {
+        if id == 42 && data.len() == 1 {
             Some(Self {
                 i2c_bus: data[0],
             })
@@ -939,7 +941,7 @@ impl CommandData for LynxI2CWriteStatusQueryResponseData {
         42 | RESPONSE_BIT
     }
     fn from_bytes(id: u16, data: &[u8], _: u8) -> Option<Self> {
-        if id == (42 | RESPONSE_BIT) {
+        if id == (42 | RESPONSE_BIT) && data.len() >= 2 {
             Some(Self { i2c_status: data[0], bytes_written: data[1] })
         } else { None }
     }
@@ -972,7 +974,7 @@ impl Into<Vec<u8>> for LynxI2CConfigureChannelCommandData {
 }
 impl Display for LynxI2CConfigureChannelCommandData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "I2CConfigureChannelCommand[i2c_addr:{},speed:{:?}]", self.i2c_bus, self.speed_code)
+        write!(f, "I2CConfigureChannelCommand[bus:{},speed:{:?}]", self.i2c_bus, self.speed_code)
     }
 }
 impl CommandData for LynxI2CConfigureChannelCommandData {
@@ -981,11 +983,10 @@ impl CommandData for LynxI2CConfigureChannelCommandData {
     }
 
     fn from_bytes(id: u16, data: &[u8], dest_addr: u8) -> Option<Self> {
-        if id == 43 {
-            let speed_code = if let Ok(it) = I2CSpeedCode::try_from(data[1]) {
-                it
-            } else {I2CSpeedCode::UNKNOWN};
-            
+        if id == 43 && data.len() == 2 {
+            //an unknown speed code stays an unknown command, so it gets forwarded byte for byte
+            let speed_code = I2CSpeedCode::try_from(data[1]).ok()?;
+
             Some(Self {
                 i2c_bus: data[0],
                 speed_code
