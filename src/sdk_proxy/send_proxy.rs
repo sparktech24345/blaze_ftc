@@ -10,10 +10,11 @@ use crate::serialization::packet::{Packet, Packets};
 use crate::telemetry::telemetry::get_allowed_to_send_dangerous_packets;
 
 pub(crate) type MessageList = Mutex<Vec<Instant>>;
+///message number 0 is reserved by the lynx protocol (the SDK only uses 1..=255), so slot 0 is never handed out
 fn register_packet_0(current_things: &mut MutexGuard<Vec<Instant>>) -> u8 {
-    let mut x = 0usize;
-    let mut old = Instant::now();
-    for i in 0..current_things.len() {
+    let mut x = 1usize;
+    let mut old = current_things[1];
+    for i in 1..current_things.len() {
         if current_things[i] < old {
             x = i;
             old = current_things[i];
@@ -50,7 +51,8 @@ pub fn generate_write_sdk_proxy(
 ) -> (Sender<Packets>, Sender<Packet>, Arc<MessageList>) {
     let (regular_tx, regular_rx) = unbounded::<Packets>();
     let (ftcsdk_tx, ftcsdk_rx) = unbounded::<Packet>();
-    let current_things_old = Arc::new(Mutex::new(vec![Instant::now(); u8::MAX as usize]));
+    //one slot per possible message number. slot 0 exists but is never used, see register_packet_0
+    let current_things_old = Arc::new(Mutex::new(vec![Instant::now(); u8::MAX as usize + 1]));
     let current_things = current_things_old.clone();
     thread::spawn(move || {
         match panic::catch_unwind(move || {
@@ -110,6 +112,8 @@ fn do_proxy(regular_rx: &Receiver<Packets>, ftcsdk_rx: &Receiver<Packet>, curren
             packet.message_number = transform.new_id; //TODO: determine if this is... a good idea
             packet.checksum = packet.checksum(); //set checksum whoops
             let mut lock = packets_to_watch.lock().unwrap();
+            //this id is being reused, so whatever was mapped to it before is stale (see Proxy::forget_transforms)
+            lock.retain(|it| it.new_id != transform.new_id);
             lock.push(transform);
             to_write.send(packet.into()).unwrap();
         }

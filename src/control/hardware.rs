@@ -23,6 +23,9 @@ use crate::serialization::command::Command;
 /// it should only be turned off for debugging purposes, where you want to test worst-case timing
 pub static DO_MOTOR_CACHING: AtomicBool = AtomicBool::new(true);
 pub static MOTOR_CACHING_THRESHOLD: AtomicU32 = AtomicU32::new(50);
+///stored in the motor power cache when we don't know what the hub is doing. it is far enough outside
+/// the i16 range that no real power can be within MOTOR_CACHING_THRESHOLD of it, so the next write always goes out
+const UNKNOWN_MOTOR_POWER: i32 = i32::MIN;
 type Data = LynxGetBulkDataResponseData;
 #[derive(Debug)]
 pub struct LynxHub {
@@ -65,7 +68,7 @@ impl LynxHub {
         bd.0.send(()).unwrap();
         LynxHub {
             module,
-            last_motor_powers: [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)],
+            last_motor_powers: [const { AtomicI32::new(UNKNOWN_MOTOR_POWER) }; 4],
             motor_directions: [AtomicBool::new(true), AtomicBool::new(true), AtomicBool::new(true), AtomicBool::new(true)],
             sender: out,
             sdk_proxy,
@@ -145,6 +148,7 @@ impl LynxHub {
     fn prepare_send_packet(&'static self, mut packet: Packet) -> (Packet, u8) {
         let proxy = self.get_proxy();
         let num = register_packet(&proxy.message_list);
+        proxy.forget_transforms(&[num]);
         packet.message_number = num;
         packet.reference_number = num;
         packet.checksum = packet.checksum();
@@ -165,6 +169,7 @@ impl LynxHub {
     fn prepare_send_packets(&'static self, packets: &mut Packets) {
         let proxy = self.get_proxy();
         let num = register_packets(&proxy.message_list, packets.len() as u8);
+        proxy.forget_transforms(&num);
         for i in 0..packets.len() {
             packets[i].message_number = num[i];
             packets[i].reference_number = num[i];
@@ -208,6 +213,10 @@ impl LynxHub {
         self.send_packets(packets)
     }
     pub fn send_motor_command(&'static self, motor: u8, mut power: f32) {
+        if motor as usize >= self.last_motor_powers.len() {
+            log::error!("cannot set power of motor {}: hubs only have {} motor ports", motor, self.last_motor_powers.len());
+            return;
+        }
         power = self.get_motor_direction(motor as usize).mult() * power;
         if power.abs() > 1.0 {
             log::trace!("attempted to fire motor w/ power > 1");
@@ -259,7 +268,21 @@ impl LynxHub {
         if packets.len() == 0 {
             return Some(())
         }
+        if self.is_over_rs.is_some() {
+            //send_packets refuses batches over RS485. we already updated the cache, so these *must* go out
+            for packet in packets {
+                self.send_lynx_packet(packet);
+            }
+            return Some(());
+        }
         self.send_lynx_packets(packets)
+    }
+    ///forget the cached motor powers so the next write to every motor is actually sent.
+    ///call this whenever something other than us may have changed the motor powers (e.g. the SDK stopping an opmode)
+    pub fn invalidate_motor_cache(&self) {
+        for power in &self.last_motor_powers {
+            power.store(UNKNOWN_MOTOR_POWER, Ordering::SeqCst);
+        }
     }
     pub fn send_servo_commands(&'static self, positions: [f64; 6]) -> Option<()> {
         let positions = positions.map(|position| {

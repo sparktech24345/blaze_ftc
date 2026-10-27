@@ -1,4 +1,4 @@
-use crate::serialization::packet::{FRAME_BYTES, Packet, bytes_equal};
+use crate::serialization::packet::{FRAME_BYTES, MAX_PACKET_LEN, MIN_PACKET_LEN, Packet, bytes_equal};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::io::Read;
 use std::panic::UnwindSafe;
@@ -70,16 +70,22 @@ where
             continue;
         }
         //log::info!("read 3");
-        let num_to_read = u16::from_le_bytes(reading.as_slice()[2..4].try_into().expect("could not convert bytes type"));
+        let num_to_read = u16::from_le_bytes(reading.as_slice()[2..4].try_into().expect("could not convert bytes type")) as usize;
         //log::info!("reading {} bytes", num_to_read);
-        if reading.len() < num_to_read as usize {
-            reading.resize(num_to_read as usize, 0);
+        if num_to_read < MIN_PACKET_LEN || num_to_read > MAX_PACKET_LEN {
+            //corrupted length. slicing with it would panic (and kill this thread), so resync on the next frame instead
+            log::info!("got impossible packet length {}, resyncing", num_to_read);
+            locked = false;
+            continue;
+        }
+        if reading.len() < num_to_read {
+            reading.resize(num_to_read, 0);
         }
         //get slice from 4 to end, we have written to 0-3 already
-        let slice = &mut reading.as_mut_slice()[4..num_to_read as usize];
+        let slice = &mut reading.as_mut_slice()[4..num_to_read];
         port.read_exact(slice).expect("failed to read exact bytes of packet len");
         //log::info!("read 4, creating packets");
-        let packet = Packet::from_data(&reading);
+        let packet = Packet::from_data(&reading[..num_to_read]);
         //log::trace!("-EVADEBUG- read bytes from lynx: {:?}", reading);
         match packet {
             None => {

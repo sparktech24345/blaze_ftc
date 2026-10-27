@@ -18,17 +18,15 @@ impl TimingAnalyzer {
             rolling_avg: Mutex::new(MovingAverage::new(500)),
         }
     }
+    ///everything is stored in micros (to_text prints millis). the moving average holds 500 samples in a u32,
+    ///so each sample is capped at 1 s to keep the sum from overflowing
     pub fn update(&self, dur: Duration) {
-        let millis = dur.subsec_millis();
+        let micros = u32::try_from(dur.as_micros()).unwrap_or(u32::MAX);
         let mut ravg = self.rolling_avg.lock().unwrap();
-        ravg.update(dur.subsec_millis());
+        ravg.update(micros.min(1_000_000));
         self.avg.store(ravg.avg(), Ordering::SeqCst);
-        if self.min.load(Ordering::SeqCst) > millis {
-            self.min.store(millis, Ordering::SeqCst);
-        }
-        if self.max.load(Ordering::SeqCst) < millis {
-            self.max.store(millis, Ordering::SeqCst);
-        }
+        self.min.fetch_min(micros, Ordering::SeqCst);
+        self.max.fetch_max(micros, Ordering::SeqCst);
     }
     pub fn to_text(&self) -> String {
         let min = (self.min.load(Ordering::SeqCst) as f64) / 1000.0;

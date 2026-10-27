@@ -91,8 +91,21 @@ impl Gamepad {
             .join(" ");                       // Join them into a single string without spaces
         log::info!("gamepad: {}", str);
     }
+    ///fills this gamepad from the SDK's Gamepad.toByteArray(). if the data is too short (e.g. a different SDK
+    ///version) the gamepad is left as it was instead of panicking on the robot thread
     pub fn read_into(&mut self, buf: &[u8]) {
+        if let Err(it) = self.try_read_into(buf) {
+            log::error!("could not read gamepad from {} bytes: {}", buf.len(), it);
+        }
+    }
+    fn try_read_into(&mut self, buf: &[u8]) -> std::io::Result<()> {
         //Self::print_bits(buf);
+        let mut parsed = *self;
+        parsed.read_fields(buf)?;
+        *self = parsed;
+        Ok(())
+    }
+    fn read_fields(&mut self, buf: &[u8]) -> std::io::Result<()> {
         let mut cursor: Cursor<&[u8]> = Cursor::new(buf);
         /*cursor.read_u8().unwrap();
         cursor.read_u8().unwrap();
@@ -104,14 +117,14 @@ impl Gamepad {
         self.id = cursor.read_i32::<LittleEndian>().unwrap();
         self.timestamp = cursor.read_i64::<LittleEndian>().unwrap();*/
         let mut buffer = [0u8; 18];
-        cursor.read_exact(&mut buffer).unwrap();
-        self.left_stick_x = cursor.read_f32::<BigEndian>().unwrap();
-        self.left_stick_y = cursor.read_f32::<BigEndian>().unwrap();
-        self.right_stick_x = cursor.read_f32::<BigEndian>().unwrap();
-        self.right_stick_y = cursor.read_f32::<BigEndian>().unwrap();
-        self.left_trigger = cursor.read_f32::<BigEndian>().unwrap();
-        self.right_trigger = cursor.read_f32::<BigEndian>().unwrap();
-        let buttons = cursor.read_i32::<BigEndian>().unwrap();
+        cursor.read_exact(&mut buffer)?;
+        self.left_stick_x = cursor.read_f32::<BigEndian>()?;
+        self.left_stick_y = cursor.read_f32::<BigEndian>()?;
+        self.right_stick_x = cursor.read_f32::<BigEndian>()?;
+        self.right_stick_y = cursor.read_f32::<BigEndian>()?;
+        self.left_trigger = cursor.read_f32::<BigEndian>()?;
+        self.right_trigger = cursor.read_f32::<BigEndian>()?;
+        let buttons = cursor.read_i32::<BigEndian>()?;
         self.touchpad_finger_1  = (buttons & 0x20000) != 0;
         self.touchpad_finger_2  = (buttons & 0x10000) != 0;
         self.touchpad           = (buttons & 0x08000) != 0;
@@ -130,6 +143,7 @@ impl Gamepad {
         self.back               = (buttons & 0x00004) != 0;
         self.left_bumper        = (buttons & 0x00002) != 0;
         self.right_bumper       = (buttons & 0x00001) != 0;
+        Ok(())
     }
 }
 

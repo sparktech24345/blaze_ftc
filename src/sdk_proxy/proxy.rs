@@ -128,6 +128,11 @@ impl Proxy {
 
         temp
     }
+    ///message numbers get reused. once we hand one out again, any SDK packet still mapped to it is never
+    ///getting its response, and keeping the mapping would steal the response meant for the new packet
+    pub(crate) fn forget_transforms(&self, ids: &[u8]) {
+        self.ftc_packets.lock().expect("could not lock ftc_packets").retain(|it| !ids.contains(&it.new_id));
+    }
     pub(crate) fn add_interceptor(&self, interceptor: Box<dyn Interceptor>) {
         self.interceptors.lock().unwrap().push(interceptor);
     }

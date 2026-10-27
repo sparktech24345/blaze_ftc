@@ -12,7 +12,6 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use bitflags::{bitflags, Flags};
-use bytemuck::bytes_of;
 use strum_macros::EnumIter;
 
 pub struct OctoQuadI2C {
@@ -32,12 +31,22 @@ impl I2CDevice<OctoQuadSnapshot, OctoQuadRegisters> for OctoQuadI2C {
 		self.read_mode.bits()
 	}
 
+	fn expected_read_len(&self) -> usize {
+		let (start, end) = OctoQuadRegisters::get_from_readmode(self.read_mode);
+		(end.addr() + end.get_len() - start.addr()) as usize
+	}
+
 	fn get_packet_utils(&self) -> (&Arc<Mutex<Vec<u8>>>, &Option<Sender<Instant>>) {
 		(&self.packets_in_flight, &self.mistake_alert_sender)
 	}
 }
 impl OctoQuadI2C {
 	pub fn new(hub: &'static LynxHub, bus: u8, i2c_addr: u8, read_mode: ReadMode) -> Self {
+		let read_mode = ReadMode::from_bits_truncate(read_mode.bits());
+		let read_mode = if read_mode.is_empty() {
+			log::error!("octoquad read mode has no data selected, reading the localizer");
+			ReadMode::LOCALIZER
+		} else { read_mode };
 		Self {
 			hub,
 			bus,
@@ -66,8 +75,10 @@ impl OctoQuadI2C {
 			quad.fire_bulk_read_request();
 		})
 	}
+	///reads every register the read mode needs in one contiguous transaction
 	pub const fn get_read_cmd(&self) -> LynxCommand {
-		self.get_read_cmd_for_registers(LOCALIZER_STATUS, LOCALIZER_CRC16)
+		let (start, end) = OctoQuadRegisters::get_from_readmode(self.read_mode);
+		self.get_read_cmd_for_registers(start, end)
 	}
 	pub const fn get_read_cmd_for_registers(&self, start: OctoQuadRegisters, end: OctoQuadRegisters) -> LynxCommand {
 		let start_addr = start.addr();
@@ -112,23 +123,36 @@ pub struct OctoQuadSnapshot {
 }
 impl From<(u8, Vec<u8>)> for OctoQuadSnapshot {
 	fn from((rm, value): (u8, Vec<u8>)) -> Self {
-		let mut data = value.as_slice();
 		let rm = ReadMode::from_bits_truncate(rm);
-		let ld = if rm.contains(ReadMode::LOCALIZER) {
-			let ld = OctoQuadLocalizerData::from(data);
-			data = &data[13..];
-			Some(ld)
+		//get_read_cmd reads one contiguous block, so every register is at its address minus the first one's.
+		//(this also handles LOCALIZER | VELOCITY, where the positions in between are read but ignored)
+		let (start, _) = OctoQuadRegisters::get_from_readmode(rm);
+		let block = |register: OctoQuadRegisters, len: usize| {
+			let offset = (register.addr() - start.addr()) as usize;
+			value.get(offset..offset + len)
+		};
+		let localizer = if rm.contains(ReadMode::LOCALIZER) {
+			block(LOCALIZER_STATUS, OctoQuadLocalizerData::LEN).map(OctoQuadLocalizerData::from)
 		} else {None};
-		let pos: Option<EncoderPosSnapshot> = if rm.contains(ReadMode::POSITIONS) {
-			let ld = *bytemuck::try_from_bytes(&data[0..32]).unwrap();
-			data = &data[32..];
-			Some(ld)
+		let positions = if rm.contains(ReadMode::POSITIONS) {
+			block(ENCODER_0_POSITION, 8 * Int32.get_len() as usize).map(|bytes| {
+				let mut pos = [0; 8];
+				for (pos, bytes) in pos.iter_mut().zip(bytes.chunks_exact(4)) {
+					*pos = i32::from_le_bytes(bytes.try_into().unwrap());
+				}
+				EncoderPosSnapshot {pos}
+			})
 		} else {None};
-		let vel: Option<EncoderVelSnapshot> = if rm.contains(ReadMode::VELOCITY) {
-			let ld = *bytemuck::try_from_bytes(&data[0..16]).unwrap();
-			Some(ld)
+		let velocities = if rm.contains(ReadMode::VELOCITY) {
+			block(ENCODER_0_VELOCITY, 8 * Int16.get_len() as usize).map(|bytes| {
+				let mut vel = [0; 8];
+				for (vel, bytes) in vel.iter_mut().zip(bytes.chunks_exact(2)) {
+					*vel = i16::from_le_bytes(bytes.try_into().unwrap());
+				}
+				EncoderVelSnapshot {vel}
+			})
 		} else {None};
-		Self {localizer: ld, positions: pos, velocities: vel}
+		Self {localizer, positions, velocities}
 	}
 }
 impl Into<Vec<u8>> for OctoQuadSnapshot {
@@ -138,10 +162,10 @@ impl Into<Vec<u8>> for OctoQuadSnapshot {
 			total.extend_from_slice(&it.into());
 		}
 		if let Some(it) = &self.positions {
-			total.extend_from_slice(&bytes_of(it));
+			it.pos.iter().for_each(|it| total.extend_from_slice(&it.to_le_bytes()));
 		}
 		if let Some(it) = &self.velocities {
-			total.extend_from_slice(&bytes_of(it));
+			it.vel.iter().for_each(|it| total.extend_from_slice(&it.to_le_bytes()));
 		}
 		total
 	}
@@ -157,11 +181,14 @@ pub struct OctoQuadLocalizerData {
 	pub heading_rad: f32,
 	pub crc: u16,
 }
+const SCALAR_LOCALIZER_HEADING_VELOCITY: f32 = 1.0/600.0;
+const SCALAR_LOCALIZER_HEADING: f32 = 1.0/5000.0;
 impl OctoQuadLocalizerData {
+	///LOCALIZER_STATUS through LOCALIZER_CRC16, inclusive
+	const LEN: usize = 15;
+	///value must be at least LEN bytes
 	fn from(value: &[u8]) -> Self {
-		const SCALAR_LOCALIZER_HEADING_VELOCITY: f32 = 1.0/600.0;
-		const SCALAR_LOCALIZER_HEADING: f32 = 1.0/5000.0;
-		let localizer_status = value[0].try_into().unwrap();
+		let localizer_status = value[0].try_into().unwrap_or(LocalizerStatus::INVALID);
 		let vel_x_mm_s = i16::from_le_bytes(value[1..3].try_into().unwrap());
 		let vel_y_mm_s = i16::from_le_bytes(value[3..5].try_into().unwrap());
 		let vel_heading_rad_s = i16::from_le_bytes(value[5..7].try_into().unwrap()) as f32 * SCALAR_LOCALIZER_HEADING_VELOCITY;
@@ -171,17 +198,16 @@ impl OctoQuadLocalizerData {
 		let crc = u16::from_le_bytes(value[13..15].try_into().unwrap());
 		Self {localizer_status, vel_x_mm_s, vel_y_mm_s, vel_heading_rad_s, pos_x_mm, pos_y_mm, heading_rad, crc}
 	}
+	///note: this leaves out the crc
 	fn into(&self) -> Vec<u8> {
-		const SCALAR_LOCALIZER_HEADING_VELOCITY: f32 = 1.0/600.0;
-		const SCALAR_LOCALIZER_HEADING: f32 = 1.0/5000.0;
 		let mut start = vec![];
 		start.extend_from_slice(&[self.localizer_status as u8]);
 		start.extend_from_slice(&self.vel_x_mm_s.to_le_bytes());
 		start.extend_from_slice(&self.vel_y_mm_s.to_le_bytes());
-		start.extend_from_slice(&((self.vel_heading_rad_s / SCALAR_LOCALIZER_HEADING_VELOCITY) as i16).to_le_bytes());
+		start.extend_from_slice(&((self.vel_heading_rad_s / SCALAR_LOCALIZER_HEADING_VELOCITY).round() as i16).to_le_bytes());
 		start.extend_from_slice(&self.pos_x_mm.to_le_bytes());
 		start.extend_from_slice(&self.pos_y_mm.to_le_bytes());
-		start.extend_from_slice(&((self.heading_rad / SCALAR_LOCALIZER_HEADING_VELOCITY) as i16).to_le_bytes());
+		start.extend_from_slice(&((self.heading_rad / SCALAR_LOCALIZER_HEADING).round() as i16).to_le_bytes());
 		start
 	}
 }
@@ -265,17 +291,6 @@ bitflags! {
     }
 }
 
-impl ReadMode {
-	const fn valid(&self) -> bool {
-		if self.bits() == 0 {
-			return false
-		}
-		if self.bits() == (Self::LOCALIZER.bits() | Self::VELOCITY.bits()) {
-			return false
-		}
-		true
-	}
-}
 impl OctoQuadRegisters {
 	const fn min(&mut self, other: Self) {
 		if other.addr() < self.addr() {
@@ -287,7 +302,11 @@ impl OctoQuadRegisters {
 			*self = other
 		}
 	}
+	///the first and last register a read mode needs. an empty read mode reads the localizer
 	const fn get_from_readmode(rm: ReadMode) -> (Self, Self) {
+		if rm.is_empty() {
+			return (LOCALIZER_STATUS, LOCALIZER_CRC16)
+		}
 		let mut start = UNKNOWN;
 		let mut end = CHIP_ID;
 		if rm.contains(ReadMode::LOCALIZER) {
@@ -310,7 +329,7 @@ impl OctoQuadRegisters {
 			LOCALIZER_YAW_AXIS, LOCALIZER_STATUS, LOCALIZER_VX, LOCALIZER_VY, LOCALIZER_VH, LOCALIZER_X, LOCALIZER_Y, LOCALIZER_H, LOCALIZER_CRC16,
 			ENCODER_0_POSITION, ENCODER_1_POSITION, ENCODER_2_POSITION, ENCODER_3_POSITION, ENCODER_4_POSITION, ENCODER_5_POSITION, ENCODER_6_POSITION, ENCODER_7_POSITION,
 			ENCODER_0_VELOCITY, ENCODER_1_VELOCITY, ENCODER_2_VELOCITY, ENCODER_3_VELOCITY, ENCODER_4_VELOCITY, ENCODER_5_VELOCITY, ENCODER_6_VELOCITY, ENCODER_7_VELOCITY,
-			ENCODER_DATA_CRC16, ];
+			ENCODER_DATA_CRC16, UNKNOWN];
 		let mut i = 0;
 		loop {
 			let it = iter[i];
@@ -323,5 +342,70 @@ impl OctoQuadRegisters {
 			}
 			i += 1;
 		}
+	}
+}
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn read_len(rm: ReadMode) -> usize {
+		let (start, end) = OctoQuadRegisters::get_from_readmode(rm);
+		(end.addr() + end.get_len() - start.addr()) as usize
+	}
+	///fake register contents: every byte is its own register address
+	fn fake_read(rm: ReadMode) -> Vec<u8> {
+		let (start, _) = OctoQuadRegisters::get_from_readmode(rm);
+		(0..read_len(rm)).map(|i| start.addr() + i as u8).collect()
+	}
+
+	#[test]
+	fn register_lengths() {
+		assert_eq!(LOCALIZER_STATUS.get_len(), 1);
+		assert_eq!(LOCALIZER_CRC16.get_len(), 2);
+		assert_eq!(ENCODER_7_POSITION.get_len(), 4);
+		assert_eq!(ENCODER_DATA_CRC16.get_len(), 2);
+		assert_eq!(UNKNOWN.get_len(), 0);
+		assert_eq!(read_len(ReadMode::LOCALIZER), OctoQuadLocalizerData::LEN);
+		assert_eq!(read_len(ReadMode::POSITIONS), 32);
+		assert_eq!(read_len(ReadMode::VELOCITY), 16);
+		assert_eq!(read_len(ReadMode::all()), 15 + 32 + 16);
+	}
+
+	#[test]
+	fn every_read_mode_parses() {
+		for bits in 1..8u8 {
+			let rm = ReadMode::from_bits_truncate(bits);
+			let snapshot = OctoQuadSnapshot::from((bits, fake_read(rm)));
+			assert_eq!(snapshot.localizer.is_some(), rm.contains(ReadMode::LOCALIZER), "{:03b}", bits);
+			assert_eq!(snapshot.positions.is_some(), rm.contains(ReadMode::POSITIONS), "{:03b}", bits);
+			assert_eq!(snapshot.velocities.is_some(), rm.contains(ReadMode::VELOCITY), "{:03b}", bits);
+			if let Some(it) = snapshot.localizer {
+				assert_eq!(it.vel_x_mm_s.to_le_bytes(), [LOCALIZER_VX.addr(), LOCALIZER_VX.addr() + 1]);
+				assert_eq!(it.crc.to_le_bytes(), [LOCALIZER_CRC16.addr(), LOCALIZER_CRC16.addr() + 1]);
+			}
+			if let Some(it) = snapshot.positions {
+				assert_eq!(it.pos[0].to_le_bytes()[0], ENCODER_0_POSITION.addr());
+				assert_eq!(it.pos[7].to_le_bytes()[0], ENCODER_7_POSITION.addr());
+			}
+			if let Some(it) = snapshot.velocities {
+				assert_eq!(it.vel[0].to_le_bytes()[0], ENCODER_0_VELOCITY.addr());
+				assert_eq!(it.vel[7].to_le_bytes()[0], ENCODER_7_VELOCITY.addr());
+			}
+		}
+	}
+
+	#[test]
+	fn short_reads_do_not_panic() {
+		let snapshot = OctoQuadSnapshot::from((ReadMode::all().bits(), vec![0; 3]));
+		assert!(snapshot.localizer.is_none() && snapshot.positions.is_none() && snapshot.velocities.is_none());
+	}
+
+	#[test]
+	fn localizer_reencodes_like_the_device() {
+		let mut raw = fake_read(ReadMode::LOCALIZER);
+		raw[0] = LocalizerStatus::RUNNING as u8;
+		let parsed = OctoQuadLocalizerData::from(&raw);
+		//everything but the crc
+		assert_eq!(OctoQuadLocalizerData::into(&parsed), raw[..OctoQuadLocalizerData::LEN - 2].to_vec());
 	}
 }

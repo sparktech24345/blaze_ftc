@@ -3,6 +3,11 @@ use crate::serialization::command::Command;
 use crate::serialization::commands::{NackData};
 
 pub const FRAME_BYTES: [u8; 2] = [68u8, 75u8];
+///frame bytes (2) + length (2) + dest, src, msg num, ref num (4) + packet id (2) + checksum (1)
+pub const MIN_PACKET_LEN: usize = 11;
+///nothing we talk to sends packets anywhere near this big (the largest are i2c reads, ~120 bytes). anything
+///claiming to be longer is a corrupted length, and we resync instead of blocking while we read garbage
+pub const MAX_PACKET_LEN: usize = 1024;
 pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -87,15 +92,21 @@ impl Packet {
         packet
     }
     pub fn is_start(data: &[u8]) -> bool {
-        bytes_equal(&data[0..2], &FRAME_BYTES)
+        data.len() >= FRAME_BYTES.len() && bytes_equal(&data[0..2], &FRAME_BYTES)
     }
+    ///returns None for anything that isn't a complete, valid packet. this never panics: the data
+    ///comes straight off the wire (or from java) and a corrupted length must not take down the thread reading it
     pub fn from_data(data: &[u8]) -> Option<Packet> {
-        if !Self::is_start(data) {
+        if data.len() < MIN_PACKET_LEN || !Self::is_start(data) {
             //check 0,1
             return None;
         }
         let len_bytes = data[2..4].try_into().expect("could not convert bytes type 0");
         let len = u16::from_le_bytes(len_bytes); //2,3
+        if (len as usize) < MIN_PACKET_LEN || len as usize > data.len() {
+            log::info!("packet claims to be {} bytes long, but we have {} bytes", len, data.len());
+            return None;
+        }
         let dest_module_addr = u8::from_le_bytes([data[4]]); //4
         let src_module_addr = u8::from_le_bytes([data[5]]); //5
         let message_number = u8::from_le_bytes([data[6]]); //6
@@ -221,13 +232,13 @@ impl Into<Packets> for Packet {
     }
 }
 impl Packet {
-    pub fn conv_byte_vec(mut packets: Packets) -> Vec<u8> {
-        let mut first: Vec<u8> = packets.remove(0).into();
+    pub fn conv_byte_vec(packets: Packets) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(packets.iter().map(|it| it.packet_length as usize).sum());
         for i in packets.into_iter() {
             let vec: Vec<u8> = i.into();
-            first.extend_from_slice(&vec)
+            bytes.extend_from_slice(&vec)
         }
-        first
+        bytes
     }
 }
 
@@ -237,7 +248,9 @@ mod tests {
     use rand::random;
     use crate::serialization::command_data::CommandData;
     use crate::serialization::command_utils::ModuleType::Lynx;
-    use crate::serialization::command_utils::RESPONSE_BIT;
+    use crate::serialization::command_utils::{StandardCommands, RESPONSE_BIT};
+    use crate::serialization::commands::KeepAliveData;
+    use crate::serialization::lynx_commands::base_lynx_command::LynxCommand;
     use crate::serialization::lynx_commands::lynx_commands::{LynxGetBulkDataResponseData, MotorData};
     use super::*;
 
@@ -259,9 +272,45 @@ mod tests {
             analog: [random(), random(), random(), random()],
         };
         let serialized: Vec<u8> = bulk.clone().into();
+        assert_eq!(serialized.len(), bulk.get_bytes_len());
         let deserialized = LynxGetBulkDataResponseData::from_bytes(0 | RESPONSE_BIT, &serialized, 0).unwrap();
-        println!("eq: {}", bulk == deserialized);
-        println!("a: {}", bulk);
-        println!("b: {}", deserialized);
+        assert_eq!(bulk, deserialized);
+    }
+    fn keepalive_bytes() -> Vec<u8> {
+        Packet::new(Command::KeepAlive(KeepAliveData {}), 2, 7).into()
+    }
+    #[test]
+    fn packet_roundtrips() {
+        let bytes = keepalive_bytes();
+        assert_eq!(bytes.len(), MIN_PACKET_LEN);
+        let packet = Packet::from_data(&bytes).expect("valid packet did not parse");
+        assert_eq!(packet.dest_module_addr, 2);
+        assert_eq!(packet.message_number, 7);
+        assert_eq!(<Packet as Into<Vec<u8>>>::into(packet), bytes);
+    }
+    #[test]
+    fn malformed_packets_are_rejected_without_panicking() {
+        let good = keepalive_bytes();
+        assert!(Packet::from_data(&[]).is_none());
+        assert!(Packet::from_data(&good[..1]).is_none());
+        assert!(Packet::from_data(&good[..good.len() - 1]).is_none());
+        for bad_len in [0u16, 3, 4, 10, 12, u16::MAX] {
+            let mut bad = good.clone();
+            bad[2..4].copy_from_slice(&bad_len.to_le_bytes());
+            assert!(Packet::from_data(&bad).is_none(), "accepted length {}", bad_len);
+        }
+    }
+    #[test]
+    fn short_payloads_become_unknown_instead_of_panicking() {
+        //a nack with no reason code, and an ack with no attention byte
+        for id in [StandardCommands::NACK as u16, StandardCommands::ACK as u16, StandardCommands::QueryInterface as u16 | RESPONSE_BIT] {
+            match Command::from_bytes(id, &[], 2, 0) {
+                Command::Unknown(_) => {}
+                Command::LynxCommand(it) if matches!(it.command, LynxCommand::LynxUnknownCommand(_)) => {}
+                other => panic!("{:016b} with an empty payload parsed as {}", id, other),
+            }
+        }
+        //an unknown nack reason code must still be printable
+        let _ = format!("{}", Command::Nack(NackData { reason_code: 19 }));
     }
 }
