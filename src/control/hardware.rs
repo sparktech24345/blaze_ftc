@@ -313,7 +313,7 @@ impl LynxHub {
             let position = position.map(|position| {
                 (position as f32 / i16::MAX as f32).clamp(0.0, 1.0)
             })?;
-            let pulse_width = position * 1800.0 + 600.0;
+            let pulse_width = position * 2000.0 + 500.0;
             let pulse_width = 65535_f32.min(pulse_width).max(1_f32) as u16;
             let servo = servo as u8;
             Some([
