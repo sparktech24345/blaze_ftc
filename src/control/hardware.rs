@@ -277,7 +277,7 @@ impl LynxHub {
             log::error!("cannot set servo {} to non-finite position {}", servo, position);
             return;
         }
-        let pulse_width = (position.clamp(0.0, 1.0) * 1800.0 + 600.0) as u16;
+        let pulse_width = (position.clamp(0.0, 1.0) * 2000.0 + 500.0) as u16;
         self.send_lynx_packet(LynxSetServoPulseWidthCommand(
             LynxSetServoPulseWidthCommandData { servo, pulse_width },
         ));
