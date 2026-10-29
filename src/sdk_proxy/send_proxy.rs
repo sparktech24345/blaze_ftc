@@ -34,11 +34,49 @@ pub(crate) fn register_packet(mg: &MessageList) -> u8 {
 }
 pub(crate) fn register_packets(mg: &MessageList, num: u8) -> Vec<u8> {
     let mut current_things = mg.lock().expect("could not lock MessageList");
+    register_packets_from(&mut current_things, num, Instant::now)
+}
+
+fn register_packets_from(
+    current_things: &mut [Instant],
+    num: u8,
+    mut now: impl FnMut() -> Instant,
+) -> Vec<u8> {
     let mut numbers = Vec::with_capacity(num as usize);
+    let mut selected = vec![false; current_things.len()];
     for _ in 0..num {
-        numbers.push(register_packet_0(&mut current_things));
+        let index = current_things
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(index, _)| !selected[*index])
+            .min_by_key(|(_, last_used)| **last_used)
+            .map(|(index, _)| index)
+            .expect("not enough message numbers for packet batch");
+        selected[index] = true;
+        current_things[index] = now();
+        numbers.push(index as u8);
     }
     numbers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_message_numbers_are_unique() {
+        let timestamp = Instant::now();
+        let mut messages = vec![timestamp; u8::MAX as usize + 1];
+        let numbers = register_packets_from(&mut messages, 4, || timestamp);
+
+        assert_eq!(numbers.len(), 4);
+        assert!(numbers.iter().all(|number| *number != 0));
+        let mut unique = numbers.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), numbers.len());
+    }
 }
 /**
  * ok so the first return is the normal one, the second is the wierd one (for ftc sdk).
